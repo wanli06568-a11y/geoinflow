@@ -7,7 +7,7 @@ import { type LiekanPageReport, pageReportParts, pageReportSchema } from '../con
 import { parseReportQuery } from '../contracts/query';
 import { buildReport } from '../report';
 import { readKeywordPage } from './keywords';
-import { withoutQueryCache } from './cache-context';
+import { withoutQueryCache, noteBrowserPopulation } from './cache-context';
 import { LiekanError } from './errors';
 import {
   analyticsCache,
@@ -19,6 +19,7 @@ import { query, reportSnapshot } from './server';
 import { attachReportEvidenceView } from './report-evidence-view';
 import { dashboardClock } from './dashboard-clock';
 import { DASHBOARD_INTERVAL } from './dashboard-snapshot-model';
+import { withReportFragments } from './report-fragments';
 
 async function readPageReportSnapshot(
   website: { id: string; name: string; domain: string },
@@ -107,7 +108,7 @@ async function readPageReportSnapshot(
         )
       )[0] || { data: '0', policy: '0' };
   const key = analyticsCacheKey(
-    `page-report-v10-${geographyVersion}-${CRAWLER_POPULATION_VERSION}`,
+    `page-report-v11-${geographyVersion}-${CRAWLER_POPULATION_VERSION}`,
     [process.env.DATABASE_URL, website.id, p, revision],
   );
   const result = await analyticsCache.read(
@@ -122,9 +123,13 @@ async function readPageReportSnapshot(
   return result;
 }
 
-export const readPageReport: typeof readPageReportSnapshot = (...args) => {
-  if (process.env.CLICKHOUSE_URL) return readPageReportSnapshot(...args);
-  return withPublishedRegistry(() => readPageReportSnapshot(...args));
+export const readPageReport: typeof readPageReportSnapshot = async (...args) => {
+  const load = () => withReportFragments(args[0].id, () => readPageReportSnapshot(...args));
+  const result = process.env.CLICKHOUSE_URL ? await load() : await withPublishedRegistry(load);
+  // The inner cache bypass owns its context; publish validated evidence to the caller's envelope.
+  for (const population of [result.value.meta.population, result.value.meta.trendPopulation])
+    if (population) noteBrowserPopulation(args[0].id, population);
+  return result;
 };
 
 /** A private async request checks the identical cache identity without starting SQL. */
@@ -136,7 +141,7 @@ export async function peekPageReport(website: { id: string }, input: unknown) {
   // Production runtime resolves resource versions. Standalone tests keep the existing direct path.
   if (!analyticsCache.isRuntimeConfigured) return undefined;
   const key = analyticsCacheKey(
-    `page-report-v10-${geographyVersion}-${CRAWLER_POPULATION_VERSION}`,
+    `page-report-v11-${geographyVersion}-${CRAWLER_POPULATION_VERSION}`,
     [process.env.DATABASE_URL, website.id, p, undefined],
   );
   return analyticsCache.peek<LiekanPageReport>(key, [websiteCacheTag(website.id)]);

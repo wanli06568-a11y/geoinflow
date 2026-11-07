@@ -66,6 +66,22 @@ export const operations = {
     queryParams: [],
     hasBody: false,
   },
+  changeLiekanInstanceStorage: {
+    operationId: 'changeLiekanInstanceStorage',
+    method: 'post',
+    path: '/api/liekan/storage',
+    pathParams: [],
+    queryParams: ['runId'],
+    hasBody: true,
+  },
+  changeLiekanWebsiteStorage: {
+    operationId: 'changeLiekanWebsiteStorage',
+    method: 'post',
+    path: '/api/liekan/websites/{websiteId}/storage',
+    pathParams: ['websiteId'],
+    queryParams: ['runId'],
+    hasBody: true,
+  },
   cloneBoard: {
     operationId: 'cloneBoard',
     method: 'post',
@@ -1138,6 +1154,14 @@ export const operations = {
     queryParams: ['view', 'generation', 'page', 'pageSize', 'cursor'],
     hasBody: false,
   },
+  getLiekanInstanceStorage: {
+    operationId: 'getLiekanInstanceStorage',
+    method: 'get',
+    path: '/api/liekan/storage',
+    pathParams: [],
+    queryParams: ['runId'],
+    hasBody: false,
+  },
   getLiekanJourneyDetails: {
     operationId: 'getLiekanJourneyDetails',
     method: 'get',
@@ -1296,6 +1320,14 @@ export const operations = {
       'page',
       'cursor',
     ],
+    hasBody: false,
+  },
+  getLiekanWebsiteStorage: {
+    operationId: 'getLiekanWebsiteStorage',
+    method: 'get',
+    path: '/api/liekan/websites/{websiteId}/storage',
+    pathParams: ['websiteId'],
+    queryParams: ['runId'],
     hasBody: false,
   },
   getLiekanWebsiteSummary: {
@@ -3502,6 +3534,14 @@ export const operations = {
     queryParams: [],
     hasBody: true,
   },
+  postLiekanRobotsAgent: {
+    operationId: 'postLiekanRobotsAgent',
+    method: 'post',
+    path: '/api/liekan/robots-agent',
+    pathParams: [],
+    queryParams: [],
+    hasBody: true,
+  },
   previewLiekanTrafficPolicy: {
     operationId: 'previewLiekanTrafficPolicy',
     method: 'post',
@@ -3557,6 +3597,14 @@ export const operations = {
     pathParams: [],
     queryParams: [],
     hasBody: true,
+  },
+  releaseLiekanAnalysisViewer: {
+    operationId: 'releaseLiekanAnalysisViewer',
+    method: 'delete',
+    path: '/api/liekan/websites/{websiteId}/analytics-jobs/{jobId}',
+    pathParams: ['websiteId', 'jobId'],
+    queryParams: [],
+    hasBody: false,
   },
   resetWebsite: {
     operationId: 'resetWebsite',
@@ -3859,6 +3907,28 @@ export abstract class GeneratedUmamiClient {
     options?: RequestOptions,
   ): Promise<OperationOutput<'cancelTwoFactorSetup'>> {
     return this.execute('cancelTwoFactorSetup', input, options);
+  }
+
+  /**
+   * Manage safe storage retention with a complete private session
+   * `POST /api/liekan/storage`
+   */
+  changeLiekanInstanceStorage(
+    input: OperationInput<'changeLiekanInstanceStorage'>,
+    options?: RequestOptions,
+  ): Promise<OperationOutput<'changeLiekanInstanceStorage'>> {
+    return this.execute('changeLiekanInstanceStorage', input, options);
+  }
+
+  /**
+   * Manage safe storage retention with a complete private session
+   * `POST /api/liekan/websites/{websiteId}/storage`
+   */
+  changeLiekanWebsiteStorage(
+    input: OperationInput<'changeLiekanWebsiteStorage'>,
+    options?: RequestOptions,
+  ): Promise<OperationOutput<'changeLiekanWebsiteStorage'>> {
+    return this.execute('changeLiekanWebsiteStorage', input, options);
   }
 
   /**
@@ -4759,6 +4829,17 @@ export abstract class GeneratedUmamiClient {
   }
 
   /**
+   * Manage safe storage retention with a complete private session
+   * `GET /api/liekan/storage`
+   */
+  getLiekanInstanceStorage(
+    input?: OperationInput<'getLiekanInstanceStorage'>,
+    options?: RequestOptions,
+  ): Promise<OperationOutput<'getLiekanInstanceStorage'>> {
+    return this.execute('getLiekanInstanceStorage', input, options);
+  }
+
+  /**
    * 查询路径关联会话
    * `GET /api/liekan/websites/{websiteId}/journeys/details`
    */
@@ -4855,6 +4936,17 @@ export abstract class GeneratedUmamiClient {
     options?: RequestOptions,
   ): Promise<OperationOutput<'getLiekanTrafficQuality'>> {
     return this.execute('getLiekanTrafficQuality', input, options);
+  }
+
+  /**
+   * Manage safe storage retention with a complete private session
+   * `GET /api/liekan/websites/{websiteId}/storage`
+   */
+  getLiekanWebsiteStorage(
+    input: OperationInput<'getLiekanWebsiteStorage'>,
+    options?: RequestOptions,
+  ): Promise<OperationOutput<'getLiekanWebsiteStorage'>> {
+    return this.execute('getLiekanWebsiteStorage', input, options);
   }
 
   /**
@@ -6079,6 +6171,17 @@ export abstract class GeneratedUmamiClient {
   }
 
   /**
+   * Pair an explicitly authorized robots helper or exchange a pinned-file job and receipt
+   * `POST /api/liekan/robots-agent`
+   */
+  postLiekanRobotsAgent(
+    input: OperationInput<'postLiekanRobotsAgent'>,
+    options?: RequestOptions,
+  ): Promise<OperationOutput<'postLiekanRobotsAgent'>> {
+    return this.execute('postLiekanRobotsAgent', input, options);
+  }
+
+  /**
    * Preview traffic policy impact
    * `POST /api/liekan/websites/{websiteId}/traffic-quality/preview`
    */
@@ -6156,6 +6259,17 @@ export abstract class GeneratedUmamiClient {
     options?: RequestOptions,
   ): Promise<OperationOutput<'record'>> {
     return this.execute('record', input, options);
+  }
+
+  /**
+   * Release this private browser read without cancelling other viewers
+   * `DELETE /api/liekan/websites/{websiteId}/analytics-jobs/{jobId}`
+   */
+  releaseLiekanAnalysisViewer(
+    input: OperationInput<'releaseLiekanAnalysisViewer'>,
+    options?: RequestOptions,
+  ): Promise<OperationOutput<'releaseLiekanAnalysisViewer'>> {
+    return this.execute('releaseLiekanAnalysisViewer', input, options);
   }
 
   /**
