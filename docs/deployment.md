@@ -8,12 +8,52 @@
 
 ## 环境要求
 
-- 已安装并启动的 Docker Engine 或 Docker Desktop，以及 Docker Compose V2。
+- 已安装并启动的 Docker Engine 或 Docker Desktop、Docker Buildx，以及支持 `build --builder` 的 Docker Compose。宿主机需支持内存、Swap 和 CPU 配额限制。
 - Linux 的 `flock`，或 macOS 的 `lockf`，用于防止两个部署同时执行。
 - 可访问容器镜像、Node 依赖和地理数据库下载源的网络。
 - 可供 Docker、构建过程、PostgreSQL 和应用使用的内存与磁盘空间。
 
-镜像固定 Node.js 22.23.4、pnpm 12.3.4。Docker 构建的 Node 堆配置为 3072 MiB，还需要为构建原生组件、Docker 虚拟机及其他服务预留内存。运行规模取决于真实日志量、数据保留范围、并发与后台构建，按自己的数据实测容量。
+镜像固定 Node.js 22.23.4、pnpm 12.3.4。源码构建要求 Docker 总内存至少 **6 GiB**，所在机器的当前可用内存至少 **6 GiB**，建议 **8 GiB 或以上、2 个 CPU 或以上**。脚本通过无挂载、无网络、只读的临时容器读取 Docker 所在机器的 `MemAvailable`，覆盖 Linux、Docker Desktop 虚拟机和远程 Docker；首次探测可能下载固定 Node 基础镜像。创建项目配置前检查一次，开始构建前再次检查。
+
+```sh
+sh scripts/liekan-deploy.sh --check
+```
+
+该命令检查 Docker 连通性、构建插件、资源配额支持与内存余量，不创建项目配置或启动应用。8 GiB 机器仅剩 2～3 GiB 可用时会提前停止。小内存服务器可在独立构建机生成与源码提交对应的镜像，再将同一镜像部署给应用及两个 worker；运行目标的容量按实际负载测量。
+
+部署使用安装目录与 Docker 实例专属的 BuildKit 构建器，整体上限为 **1 核 CPU、5 GiB 内存**；单核机器的 CPU 上限为半核。构建器禁用 Swap，BuildKit 同时执行一个构建步骤，Next.js 静态生成与 Rayon 均使用一个工作线程，Node 堆上限为 3072 MiB。Docker 生产编译使用 Webpack 独立构建进程及内存优化，编译进程结束后释放内存，再执行完整类型检查；本地 `build:app` 保留 Turbopack。配置依据 [Next.js 内存优化指南](https://nextjs.org/docs/app/guides/memory-usage)。剩余至少 1 GiB 可用内存作为系统余量，其他业务后续增长仍需监控。CPU 限制会延长构建时间。
+
+构建器使用 `moby/buildkit:buildx-stable-1` 镜像，保留独立缓存供后续部署复用；构建结束或可捕获的失败退出时停止构建器，保持用户原有默认构建器选择。实际配额核验失败会停止部署。内存检查与资源隔离只覆盖此部署脚本；直接执行 `docker compose build` 使用所选构建器。配额机制见 [Docker 构建器文档](https://docs.docker.com/build/builders/drivers/docker-container/)。
+
+同一 Docker 实例通过名为 `geoinflow-build-lease` 的已停止容器保留原子构建租约，覆盖不同源码目录与 Docker 客户端；取得租约后再次检查可用内存。构建器停止后才释放租约。强制终止部署或构建器无法停止时可能保留租约。先读取所有者，再直接向 Docker 守护进程核对构建器容器；确认它已停止且对应部署已结束，才可删除租约后重试。Buildx 列表仅显示当前客户端登记的构建器。
+
+```sh
+owner=$(docker inspect --format '{{index .Config.Labels "io.liekan.build-owner"}}' geoinflow-build-lease)
+docker inspect --format '{{.State.Status}}' "buildx_buildkit_geoinflow-build-v1-${owner}0"
+# 确认对应构建器已停止、部署已结束后：
+docker rm geoinflow-build-lease
+```
+
+专属 BuildKit 的镜像源、代理和证书配置独立于 Docker 守护进程。依赖私有镜像加速源或 CA 的环境，可在首次创建构建器前准备权限为 0600 的 `.local/liekan-buildkit.toml`，保留 `[worker.oci]` 下的 `max-parallelism = 1`，按 [BuildKit 网络配置](https://docs.docker.com/build/buildkit/configure/) 添加 registry mirrors 与 CA。该私有文件不进入 Git 或构建上下文。已有构建器继续复用创建时的配置；更新前确认构建器停止，使用 `docker buildx rm --keep-state 构建器名` 保留缓存，再创建新配置。
+
+HTTP(S) 代理通过构建器的 driver options 配置。在项目根目录按以下模板预建构建器，将代理地址替换为构建容器可达的地址；需要镜像源或 CA 时，将配置路径替换为上述私有 TOML。部署脚本随后复用此构建器并核验配额，用户原有默认构建器继续保持原状。代理配置仅保存在私有 Docker 设置中。
+
+```sh
+. ./config/liekan/build-resources.sh
+builder_key=$(printf '%s\n' "$PWD" "$(docker info --format '{{.ID}}')" | cksum | awk '{ print $1 }')
+quota=100000
+if [ "$(docker info --format '{{.NCPU}}')" = 1 ]; then quota=50000; fi
+docker buildx create --name "geoinflow-build-v1-$builder_key" --driver docker-container \
+  --driver-opt "memory=${liekan_build_memory_mib}m" --driver-opt "memory-swap=${liekan_build_memory_mib}m" \
+  --driver-opt cpu-period=100000 --driver-opt "cpu-quota=$quota" \
+  --driver-opt restart-policy=no \
+  --driver-opt env.HTTP_PROXY=http://proxy.internal:3128 \
+  --driver-opt env.HTTPS_PROXY=http://proxy.internal:3128 \
+  --buildkitd-config config/liekan/buildkit.toml
+sh scripts/liekan-deploy.sh
+```
+
+安装时若机器失去响应或构建退出 137，先检查 Docker/宿主机内存、磁盘和系统 OOM 日志；Linux 可运行 `free -h`、`df -h`、`journalctl -k --since "30 minutes ago"`。分享日志前移除凭据与个人信息。
 
 新安装使用 PostgreSQL 16 和 Redis 7.4。已有 PostgreSQL 15 实例继续保留 15。切换数据库主版本需要单独制定迁移与恢复方案。
 
@@ -38,6 +78,10 @@ sh scripts/liekan-deploy.sh
 
 首次安装的初始账号为 `admin / liekan`。登录后修改密码，确认国家与分析时区。升级保留自定义凭据、已重命名和已删除的账号。
 
+密码登录按固定一分钟窗口限制：每个账号 10 次、每个可信客户端来源 30 次、实例共享总量 120 次，并限制并发校验。超过限制返回 `429` 与 `Retry-After`；配置的共享 Redis 不可用时返回 `503`。优先使用 `REDIS_URL`，否则使用 `LIEKAN_ANALYTICS_REDIS_URL`，两者都未配置时使用进程内计数。计数会在进程重启或 Redis 数据淘汰后重建，因此公网入口还应配置独立限速。客户端来源只读取显式配置的可信入口头；未配置或无有效地址的请求共用未知来源额度。多实例应使用同一个共享 Redis，并由入口代理覆盖可信地址头。
+
+浏览器 tracker 与接收接口会遮蔽 URL 查询和片段中的已知敏感参数，并保留普通 UTM 归因参数。此规则只处理新采集的数据，已有历史记录和业务主动提交的标题、自定义属性需要独立核查。录制未配置遮蔽级别时默认采用严格遮蔽；已明确保存的标准遮蔽配置继续生效。严格遮蔽覆盖文字和输入，敏感页面仍应通过排除元素或不安装录制脚本限制采集。
+
 部署脚本重复执行时保留已有 `.env`、数据库凭据与数据卷。发现已有数据库卷却缺少原配置时会停止，要求先恢复配置。升级采用原数据库容器与镜像大版本，避免无意切换存储版本。
 
 本文命令均显式使用 `docker-compose.liekan.yml`。根目录其他 Docker 文件保留上游兼容用途，常规部署使用本产品脚本。
@@ -61,13 +105,13 @@ docker compose -f docker-compose.liekan.yml logs --tail=100 analytics-worker
 
 日志接收与处理、统计查询与历史构建由不同后台承担。接收成功而统计尚未更新时，继续核对处理状态、队列和数据截止时间。
 
-## 初始化可选示例
+## 官方示例初始化
 
 ```sh
 docker compose -f docker-compose.liekan.yml exec app node scripts/liekan-seed-demo.mjs
 ```
 
-示例为“猎看官网（示例数据）”，带明确数据标识。首次导入平移时间；重复导入保持已有数据和删除状态。正式网站按 [快速开始](getting-started.md) 接入真实输入。
+Docker 首次启动在迁移后自动导入“猎看官网（示例数据）”，上面的命令可用于手动开发和显式重试。源码与镜像包含完整脱敏数据包、目录和校验清单。首次导入平移时间；重复导入保持已有数据、自定义资源和清空、删除状态。正式网站按 [快速开始](getting-started.md) 接入真实输入。
 
 ## 域名、HTTPS 与可信入口
 

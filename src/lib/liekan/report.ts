@@ -1,23 +1,34 @@
-import { applyReportPopulation, identityUnavailableReason } from './contracts/population-results';
-import { identityComplete, identityUsable } from './contracts/browser-population';
-import { dashboardClock } from './upstream/dashboard-clock';
-import { getPublishedCatalog } from './crawlers/published';
-import { crawlerAiRequests, isUnknownCrawler } from './rules/population';
 import { endOfDay } from 'date-fns';
 import { formatInTimeZone, fromZonedTime, toZonedTime } from 'date-fns-tz';
-import { isbot } from 'isbot';
+import { identityComplete, identityUsable } from './contracts/browser-population';
+import { calendarDayCount, calendarDayRange } from './contracts/calendar';
+import {
+  countryName,
+  geographyCoverage,
+  geographyDisplay,
+  geographyLabel,
+  geographyTableDisplay,
+  isCountryCode,
+  knownChinaProvince,
+  mergeGeography,
+  regionName,
+} from './contracts/geography';
 import { pageReportParts, visitorOverviewCards } from './contracts/page-report';
-import { parseReportQuery, pagableTables, tablePageSize } from './contracts/query';
+import { applyReportPopulation, identityUnavailableReason } from './contracts/population-results';
+import { pagableTables, parseReportQuery, tablePageSize } from './contracts/query';
 import {
   type DataState,
   type LiekanReport,
   liekanReportSchema,
   type Row,
 } from './contracts/report';
-import { summarizeSearchEngines, searchChannels } from './contracts/search-engines';
+import { searchChannels, summarizeSearchEngines } from './contracts/search-engines';
 import { sharedReportParts } from './contracts/shared-report';
-import { calendarDayRange, calendarDayCount } from './contracts/calendar';
+import { getPublishedCatalog } from './crawlers/published';
+import { logEntryRows, logSummaryView } from './log-report-parts';
+import { crawlerAiRequests } from './rules/population';
 import { getSettings } from './store';
+import { timeReportQuery } from './upstream/analysis-diagnostics';
 import {
   classifyEntrySource,
   getHumanConversions,
@@ -25,17 +36,7 @@ import {
   getHumanFacts,
   type HumanFact,
 } from './upstream/analytics';
-import {
-  countryName,
-  regionName,
-  mergeGeography,
-  geographyTableDisplay,
-  geographyDisplay,
-  geographyLabel,
-  geographyCoverage,
-  knownChinaProvince,
-  isCountryCode,
-} from './contracts/geography';
+import { dashboardClock } from './upstream/dashboard-clock';
 import {
   getContentImpact,
   getLogFacts,
@@ -44,6 +45,7 @@ import {
   getPlotLogs,
 } from './upstream/logs';
 import { humanPathFromEncoded } from './upstream/paths';
+import { readReportFragment } from './upstream/report-fragments';
 import { LiekanError } from './upstream/server';
 
 const pct = (a: number, b: number): number | null => (b ? Math.round((a / b) * 10000) / 100 : null);
@@ -125,12 +127,55 @@ export async function buildReport(
   const start = new Date(p.startAt),
     end = new Date(readEndAt);
   const todayStart = new Date(calendarDayRange(clock?.dayAt ?? now, p.timezone).startAt);
-  const plotStart = new Date(p.chartPeriod === 'today' ? calendarDayRange(p.endAt, p.timezone).startAt :
-    Math.max(
-      pageOnly === 'share' ? p.startAt : 0,
-      (clock ? p.endAt : readEndAt) - { '30d': 30, '7d': 7, '24h': 1 }[p.chartPeriod] * 86400000,
-    ),
+  const plotStart = new Date(
+    p.chartPeriod === 'today'
+      ? calendarDayRange(p.endAt, p.timezone).startAt
+      : Math.max(
+          pageOnly === 'share' ? p.startAt : 0,
+          (clock ? p.endAt : readEndAt) -
+            { '30d': 30, '7d': 7, '24h': 1 }[p.chartPeriod] * 86400000,
+        ),
   );
+  const module = <T>(
+    kind: Parameters<typeof timeReportQuery>[0],
+    from: Date,
+    until: Date,
+    conditions: unknown,
+    load: () => Promise<T>,
+  ) =>
+    timeReportQuery(kind, () =>
+      fullTableExport ||
+      (kind === 'logs' && (!parts?.logs || parts.logs.some(field => field === 'recent')))
+        ? load()
+        : readReportFragment(
+            kind,
+            from,
+            until,
+            conditions,
+            load,
+            kind === 'human' || kind === 'plot-human' || p.crawlerMetricsVersion !== 1,
+          ),
+    );
+  // These modules consume their own fields and range; chart selection is assembled separately.
+  const logConditions = {
+    timezone: p.timezone,
+    page: p.page,
+    filter: p.filter,
+    search: p.search,
+    cursor: p.cursor,
+    seek: p.seek,
+    fields: parts?.logs,
+    crawlerIdentityScope: p.crawlerIdentityScope,
+    crawlerMetricsVersion: p.crawlerMetricsVersion,
+    botType: p.botType,
+    botId: p.botId,
+    botName: p.botName,
+    botProductForm: p.botProductForm,
+    botCategory: p.botCategory,
+    resource: p.resource,
+    fullTableExport,
+    comparisonBoundary,
+  };
   const [
     rawHuman,
     rawLogs,
@@ -142,52 +187,114 @@ export async function buildReport(
     plotFacts,
     plotLogs,
   ] = await Promise.all([
-    getHumanFacts(website.id, start, end, p.timezone, parts?.human as readonly HumanFact[]),
-    getLogFacts(
-      website.id,
+    module(
+      'human',
       start,
       end,
-      p.timezone,
-      p.page,
-      p.filter,
-      p.search,
-      p.cursor,
-      p.seek,
-      parts?.logs,
-      p,
-      fullTableExport,
-      comparisonBoundary,
+      {
+        timezone: p.timezone,
+        fields: parts?.human,
+        crawlerContext: pageOnly === true && p.resource.startsWith('ai/'),
+      },
+      () =>
+        getHumanFacts(
+          website.id,
+          start,
+          end,
+          p.timezone,
+          parts?.human as readonly HumanFact[],
+          undefined,
+          { crawlerContext: pageOnly === true && p.resource.startsWith('ai/') },
+        ),
     ),
-    getSettings(website.id),
+    module('logs', start, end, logConditions, () =>
+      getLogFacts(
+        website.id,
+        start,
+        end,
+        p.timezone,
+        p.page,
+        p.filter,
+        p.search,
+        p.cursor,
+        p.seek,
+        parts?.logs,
+        p,
+        fullTableExport,
+        comparisonBoundary,
+      ),
+    ),
+    timeReportQuery('settings', () => getSettings(website.id)),
     needed('overview', 'logs') && (!clock || now > +todayStart)
-      ? getLogToday(website.id, todayStart, new Date(Math.max(+todayStart, now)))
+      ? timeReportQuery('today-logs', () =>
+          getLogToday(website.id, todayStart, new Date(Math.max(+todayStart, now))),
+        )
       : Promise.resolve({ requests: 0, accepted: 0, abnormal: 0 }),
     needed('overview', 'conversions') && (!clock || now > +todayStart)
-      ? getHumanConversions(
-          website.id,
-          todayStart,
-          new Date(Math.max(+todayStart, now)),
-          p.timezone,
+      ? timeReportQuery('today-conversions', () =>
+          getHumanConversions(
+            website.id,
+            todayStart,
+            new Date(Math.max(+todayStart, now)),
+            p.timezone,
+          ),
         )
       : Promise.resolve(0),
-    needed('content') ? getContentImpact(website.id, start, end, p) : Promise.resolve([]),
-    needed('ai/overview') ? getMonthlyAiShare(website.id, end, p.timezone, p) : Promise.resolve([]),
+    needed('content')
+      ? timeReportQuery('content-impact', () => getContentImpact(website.id, start, end, p))
+      : Promise.resolve([]),
+    needed('ai/overview')
+      ? timeReportQuery('monthly-ai', () => getMonthlyAiShare(website.id, end, p.timezone, p))
+      : Promise.resolve([]),
     needed('overview', 'human/overview')
-      ? getHumanDays(website.id, plotStart, end, p.timezone, ['today', '24h'].includes(p.chartPeriod))
+      ? module(
+          'plot-human',
+          plotStart,
+          end,
+          { timezone: p.timezone, hour: ['today', '24h'].includes(p.chartPeriod) },
+          () =>
+            getHumanDays(
+              website.id,
+              plotStart,
+              end,
+              p.timezone,
+              ['today', '24h'].includes(p.chartPeriod),
+            ),
+        )
       : Promise.resolve({ rows: [], population: undefined }),
     needed('overview', 'human/overview')
-      ? getPlotLogs(website.id, plotStart, end, p.timezone, ['today', '24h'].includes(p.chartPeriod), p)
+      ? module(
+          'plot-logs',
+          plotStart,
+          end,
+          {
+            timezone: p.timezone,
+            hour: ['today', '24h'].includes(p.chartPeriod),
+            crawlerIdentityScope: p.crawlerIdentityScope,
+            crawlerMetricsVersion: p.crawlerMetricsVersion,
+          },
+          () =>
+            getPlotLogs(
+              website.id,
+              plotStart,
+              end,
+              p.timezone,
+              ['today', '24h'].includes(p.chartPeriod),
+              p,
+            ),
+        )
       : Promise.resolve([]),
   ]);
   const plotHuman = plotFacts.rows;
   const trendState: DataState = !identityUsable(plotFacts.population)
     ? 'unavailable'
-    : plotHuman.length ? 'available' : 'empty';
+    : plotHuman.length
+      ? 'available'
+      : 'empty';
   const h = stringifySafe(rawHuman),
     l = stringifySafe(rawLogs);
   const halfOpen = p.crawlerMetricsVersion === 1;
-  const calendarStart =
-    calendarDayRange(+start, p.timezone).startAt === +start;
+  const calendarStart = calendarDayRange(+start, p.timezone).startAt === +start;
   const days = Math.max(
     1,
     calendarStart
@@ -429,7 +536,10 @@ export async function buildReport(
     path: page.path,
     humanPv: page.pv,
     aiRequests: l.latest ? (humanAiPages.get(page.path)?.requests ?? 0) : null,
-    ratio: l.latest && identityComplete(t.population) ? ratio(humanAiPages.get(page.path)?.requests ?? 0, page.pv) : null,
+    ratio:
+      l.latest && identityComplete(t.population)
+        ? ratio(humanAiPages.get(page.path)?.requests ?? 0, page.pv)
+        : null,
     bot: humanAiPages.get(page.path)?.bot ?? null,
     ...(humanAiPages.get(page.path)?.botId !== undefined && {
       botId: humanAiPages.get(page.path).botId,
@@ -534,18 +644,7 @@ export async function buildReport(
     trend: g.previous ? Math.round((g.count / g.previous - 1) * 10000) / 100 : null,
     path: g.path,
   }));
-  r.tables.logBody = l.recent.map(row => ({
-    ...row,
-    ...(row.identityEvidence != null && typeof row.identityEvidence === 'object'
-      ? { identityEvidence: JSON.stringify(row.identityEvidence) }
-      : {}),
-    time: row.time,
-    classification: isUnknownCrawler(row)
-      ? isbot(row.userAgent || '')
-        ? '自动化特征 · 身份未核验'
-        : '未知／未分类'
-      : `${row.bot} · ${row.verification === 'verified_range' ? '官方 IP 范围匹配' : row.verification === 'verified_dns' ? '官方 DNS 双向核验' : row.verification === 'verified_edge' ? '可信边缘身份核验' : row.verification === 'range_mismatch' ? '官方范围未匹配' : '身份未核验'}`,
-  }));
+  r.tables.logBody = logEntryRows(l.recent);
   r.tables.blindList = (l.latest ? blind : []).map(page => ({
     path: page.path,
     reason: '已收录目录，所选范围无 AI 抓取',
@@ -575,19 +674,13 @@ export async function buildReport(
     preference: preference(b.name, b.botId),
     botId: b.botId,
   }));
-  r.tables.pipeList = [
-    {
-      name: '日志导入',
-      detail: l.latest ? '导入完成，主动刷新读取' : '支持 combined / JSON 单批导入',
-      state: l.latest ? '已接入' : '待接入',
-    },
-    { name: '身份验证', detail: '官方 IP 范围核验；历史或过期依据保留未核验', state: '已接入' },
-    {
-      name: '内容目录',
-      detail: `${l.catalog.length} 条目录记录`,
-      state: catalog.size ? '已接入' : '待接入',
-    },
-  ];
+  r.tables.pipeList = logSummaryView({
+    latest: l.latest,
+    catalogCount: l.catalog.length,
+    logState,
+    ruleCount: settings.rules.length,
+    today: todayLogs,
+  }).pipeList;
   r.tables.envGrid = ['device', 'browser', 'os'].flatMap(category =>
     aggregate(h.environment, category, 'sessions').map(row => ({
       category,
@@ -960,7 +1053,9 @@ export async function buildReport(
   );
   card(
     '案例页 AI/浏览 比值',
-    l.latest && catalog.size && identityComplete(t.population) ? ratio(cases.ai, cases.human) : null,
+    l.latest && catalog.size && identityComplete(t.population)
+      ? ratio(cases.ai, cases.human)
+      : null,
     catalogLogState,
   );
   card(
@@ -1033,15 +1128,14 @@ export async function buildReport(
   );
   card('转化页 TOP1', [...h.goals].sort((a, b) => b.count - a.count)[0]?.path ?? null, goalState);
   card('白皮书下载', h.goals.find(g => /白皮书|download/i.test(g.name))?.count ?? null, goalState);
-  card('日志处理能力', null, 'unsupported', '', '单批 10 MiB / 10000 行；吞吐量待压测');
-  card('今日已解析', l.latest ? todayLogs.accepted : null, logState, '', '今日导入的有效日志行数');
-  card('蜘蛛识别规则', settings.rules.length, 'available');
-  card(
-    '异常请求（今日）',
-    l.latest ? todayLogs.abnormal : null,
-    logState,
-    '',
-    '已接入日志中状态码 ≥400 的请求',
+  r.cards.push(
+    ...logSummaryView({
+      latest: l.latest,
+      catalogCount: l.catalog.length,
+      logState,
+      ruleCount: settings.rules.length,
+      today: todayLogs,
+    }).cards,
   );
   if (!parts || parts.insights) {
     const insightDate = (time: number) => formatInTimeZone(time, p.timezone, 'yyyy-MM-dd');

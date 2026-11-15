@@ -216,16 +216,19 @@ headers.push({
   ],
 });
 const crawlerPrivatePaths = [
+  '/liekan/robots-agent/:path*',
   '/liekan/crawler-handoffs/:path*',
   '/liekan/history-repair/:path*',
   '/liekan/cache-manifest/:path*',
   '/liekan/analytics-acceleration/:path*',
+  '/liekan/storage/:path*',
   '/liekan/admin/crawler-sources/:path*',
   '/liekan/admin/crawler-registry/:path*',
   '/liekan/crawler-registry/:path*',
   '/liekan/catalog-version/:path*',
   ...[
     'control-connections',
+    'robots',
     'crawler-analysis',
     'crawler-recognition',
     'crawler-candidates',
@@ -242,6 +245,7 @@ const crawlerPrivatePaths = [
     'history-repair',
     'geo-weight',
     'analytics-acceleration',
+    'storage',
     'analytics-jobs',
     'page-report',
     'analytics',
@@ -332,7 +336,9 @@ export default withNextIntl({
   },
   experimental: {
     useTypeScriptCli: true,
-    cpus: 2,
+    cpus: 1,
+    webpackBuildWorker: true,
+    webpackMemoryOptimizations: true,
   },
   async headers() {
     return [...headers, ...asyncAnalysisHeaders];

@@ -1,3 +1,4 @@
+import { pumpAnalyticsEngine } from '../lib/liekan/upstream/analytics-engine-worker';
 import { probeAnalysisExpansion } from '../lib/liekan/upstream/analysis-expansion';
 import { pumpDashboardDemand } from '../lib/liekan/upstream/dashboard-snapshots';
 import {
@@ -34,6 +35,8 @@ import {
 import { analyticsRedis } from '../lib/liekan/upstream/analytics-redis';
 import prisma from '../lib/prisma';
 import { processAnalyticsRefresh, readAnalyticsHotStrongVersion } from './analytics-refresh';
+import { pumpStorageRetention } from '../lib/liekan/upstream/storage-retention';
+import { maintainAnalyticsInputSummaries } from '../lib/liekan/upstream/analytics-input-summary';
 
 const boss = new PgBoss({
   connectionString: process.env.DATABASE_URL,
@@ -50,12 +53,15 @@ async function pump() {
   if (stopped || pumping) return;
   pumping = true;
   try {
+    await pumpAnalysisQueries(boss);
     await bootstrapAnalysisHistory();
+    await pumpAnalysisQueries(boss);
     await reconcileAnalysisRollups();
-    await pumpDashboardDemand();
+    await pumpDashboardDemand(() => pumpAnalysisQueries(boss));
     await pumpAnalysisQueries(boss);
     await pumpAnalysisBuilds(boss);
     await pumpAnalyticsHot(boss, readAnalyticsHotStrongVersion);
+    await maintainAnalyticsInputSummaries();
   } catch {
     /* A maintenance failure leaves persistent hot demand for the next pass. */
   } finally {
@@ -63,6 +69,16 @@ async function pump() {
   }
 }
 await boss.start();
+let storageScheduledAt = Date.now();
+const storageMaintenance = setInterval(() => {
+  const schedule = Date.now() - storageScheduledAt >= 60000;
+  if (schedule) storageScheduledAt = Date.now();
+  if (!stopped)
+    void pumpStorageRetention(boss, { schedule, manualOnly: !schedule }).catch(() =>
+      console.info('storage_cleanup_deferred'),
+    );
+}, 5000);
+void pumpStorageRetention(boss).catch(() => console.info('storage_cleanup_deferred'));
 await boss.work<GeoSnapshotJob>(
   GEO_SNAPSHOT_QUEUE,
   { localConcurrency: 1, batchSize: 1, pollingIntervalSeconds: 1 },
@@ -89,7 +105,7 @@ await boss.work<AnalyticsRefreshJob>(
 );
 await boss.work<{ id: string }>(
   ANALYSIS_QUERY_QUEUE,
-  { localConcurrency: 2, batchSize: 1, pollingIntervalSeconds: 1 },
+  { localConcurrency: 2, batchSize: 1, pollingIntervalSeconds: 1, includeMetadata: true },
   async jobs => {
     for (const job of jobs) if (!stopped) await processAnalysisQueryDelivery(job, boss);
   },
@@ -103,6 +119,10 @@ await boss.work<{ id: string; kind: 'history' | 'incremental' }>(
         await processAnalysisBuild(job.data.id, job.data.kind, { shouldStop: () => stopped });
   },
 );
+const engineMaintenance = setInterval(() => {
+  void pumpAnalyticsEngine().catch(() => {});
+}, 5000);
+void pumpAnalyticsEngine().catch(() => {});
 const maintenance = setInterval(() => {
   void pump();
 }, 5000);
@@ -115,8 +135,10 @@ for (const signal of ['SIGINT', 'SIGTERM'])
   process.on(signal, async () => {
     stopped = true;
     clearInterval(maintenance);
+    clearInterval(engineMaintenance);
     clearInterval(geoMaintenance);
     clearInterval(heartbeat);
+    clearInterval(storageMaintenance);
     await boss.stop({ graceful: true });
     analyticsRedis.close();
     await prisma.client.$disconnect();

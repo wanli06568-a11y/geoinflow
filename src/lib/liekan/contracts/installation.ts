@@ -37,7 +37,11 @@ export interface LogCapability {
   runtimes?: { docker: boolean; systemd: boolean };
 }
 export const serverRuntimeSchema = z.enum(['docker', 'systemd']);
-export const serverPairingSchema = z.strictObject({ runtime: serverRuntimeSchema.optional() });
+export const serverPairingSchema = z.strictObject({
+  runtime: serverRuntimeSchema.optional(),
+  /** Pre-built manual kit: skip app-served installer assets and return the code only. */
+  manual: z.boolean().optional(),
+});
 export function logPublicOrigin(value: string): string | null {
   try {
     const url = new URL(value);
@@ -67,6 +71,40 @@ export interface InstallationProgress {
 export interface IdentityIngressDiagnostic {
   configured: boolean;
   state: 'missing_configuration' | 'needs_ingress_verification';
+  observation?: InstallationIdentityObservation;
+}
+export interface InstallationIdentityObservation {
+  version: 'received-browser-identity-v1';
+  timeBasis: 'received_at';
+  population: 'raw_public_pv';
+  range: { startAt: number; endAt: number; timezone: 'UTC'; endExclusive: true };
+  status:
+    | 'empty'
+    | 'complete'
+    | 'partial'
+    | 'unavailable'
+    | 'unknown'
+    | 'demo'
+    | 'unsupported'
+    | 'temporarily_unavailable';
+  sampleCount: number | null;
+  availableIdentityCount: number | null;
+  unknownIdentityCount: number | null;
+  coverage: number | null;
+  lastReceivedAt: string | null;
+  smallSample: boolean | null;
+  reasons: (
+    | 'no_received_samples'
+    | 'small_sample'
+    | 'identity_input_unavailable'
+    | 'identity_evidence_missing'
+    | 'partial_identity'
+    | 'reception_fallback'
+    | 'demo_data'
+    | 'unsupported_database'
+    | 'diagnostic_timeout'
+    | 'diagnostic_unavailable'
+  )[];
 }
 export interface InstallationStatus {
   identityIngress?: IdentityIngressDiagnostic;

@@ -1,28 +1,27 @@
 'use client';
-import { AnalysisPendingNotice } from './AnalysisPendingNotice';
-import { downloadTrafficEvidence } from '@/lib/liekan/upstream/features-client';
-import { reportEvidenceViewPayload } from '@/lib/liekan/contracts/report-evidence-view';
 import { sha256 } from '@noble/hashes/sha2.js';
 import { bytesToHex } from '@noble/hashes/utils.js';
-import { crawlerDetailSelection } from '@/lib/liekan/rules/editor';
-import { useLiekanI18n } from '@/lib/liekan/i18n/client';
-
-import { EXPORT_MAX_BYTES, type ExportFrame } from '@/lib/liekan/contracts/exports';
-import { pageSearch, pageUrl } from '@/lib/liekan/contracts/page-url';
 import { useQueryClient } from '@tanstack/react-query';
-import Link from '@/components/liekan/Link';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { keywordConditionsSchema } from '@/lib/liekan/contracts/keywords';
-import { crawlerPageFiltersSchema, crawlerProductFormForLabel } from '@/lib/liekan/contracts/query';
+import Link from '@/components/liekan/Link';
 import { featureDateRange } from '@/lib/liekan/contracts/analysis';
+
+import { EXPORT_MAX_BYTES, type ExportFrame } from '@/lib/liekan/contracts/exports';
+import { keywordConditionsSchema } from '@/lib/liekan/contracts/keywords';
 import { managementLabels } from '@/lib/liekan/contracts/management';
+import { useManualRefresh } from '@/lib/liekan/contracts/manual-refresh';
 import {
   geoPageFromPath,
   pageNavigation,
   websiteAnalysisFamily,
 } from '@/lib/liekan/contracts/navigation';
-import { websiteMatchesHandle } from '@/lib/liekan/website-handle';
+import { pageSearch, pageUrl } from '@/lib/liekan/contracts/page-url';
+import { crawlerPageFiltersSchema, crawlerProductFormForLabel } from '@/lib/liekan/contracts/query';
+import { reportEvidenceViewPayload } from '@/lib/liekan/contracts/report-evidence-view';
+import { useLiekanI18n } from '@/lib/liekan/i18n/client';
+import { crawlerDetailSelection } from '@/lib/liekan/rules/editor';
+import { useAccountPreferences } from '@/lib/liekan/upstream/account-preferences-client';
 import {
   useApi,
   useFeatureAppState,
@@ -32,20 +31,20 @@ import {
 } from '@/lib/liekan/upstream/client';
 import { useFreshnessLifecycle } from '@/lib/liekan/upstream/client-freshness';
 import { useDateRangeClock } from '@/lib/liekan/upstream/date-range-clock';
-import { useAccountPreferences } from '@/lib/liekan/upstream/account-preferences-client';
 import {
+  downloadTrafficEvidence,
   featureApi,
   getFeaturePreferences,
   streamFeatureExport,
 } from '@/lib/liekan/upstream/features-client';
+import { useLogReportParts } from '@/lib/liekan/upstream/log-report-client';
 import { pageReportQuery } from '@/lib/liekan/upstream/page-report-client';
+import { websiteMatchesHandle } from '@/lib/liekan/website-handle';
 import styles from '@/styles/liekan/Shell.module.css';
 import { AnalysisLoading, reportViews } from './AnalysisLoading';
+import { AnalysisPendingNotice } from './AnalysisPendingNotice';
 import { AnalysisTabs } from './AnalysisTabs';
-import { ManualRefreshControl } from './ManualRefreshControl';
-import { useManualRefresh } from '@/lib/liekan/contracts/manual-refresh';
 import { DataLoading, useDataLoading } from './DataLoading';
-import { activeQuickDateRange, QuickRangeButtons } from './date-quick-range';
 import {
   cardLabels,
   csvMatrix,
@@ -57,11 +56,13 @@ import {
   stateLabels,
   tableCsv,
 } from './data';
+import { activeQuickDateRange, QuickRangeButtons } from './date-quick-range';
+import { CrawlerDialog } from './features/CrawlerDialog';
+import { GeoWeightPlaceholder, GeoWeightSummary } from './features/GeoWeightSummary';
 import { featureNavigationHref } from './features/routes';
 import { useLiekanShell } from './LiekanShell';
 import { ManagementDrawer } from './ManagementDrawer';
-import { CrawlerDialog } from './features/CrawlerDialog';
-import { GeoWeightPlaceholder, GeoWeightSummary } from './features/GeoWeightSummary';
+import { ManualRefreshControl } from './ManualRefreshControl';
 import { ReportContext } from './ReportContext';
 import type { LiekanReport, Resource } from './types';
 import {
@@ -291,7 +292,7 @@ export function LiekanPage({ resource }: { resource: Resource }) {
                   ? 'other'
                   : '',
           search: pageSearch(search, website?.domain).slice(0, 200),
-          ...(!resetLogBatch && cursor ? { cursor, seek } : {}),
+          ...(!resetLogBatch && cursor ? { cursor, seek, readBoundary: params.readBoundary } : {}),
         }
       : {}),
   };
@@ -313,7 +314,11 @@ export function LiekanPage({ resource }: { resource: Resource }) {
         currentReport.queryKey.every(
           (value, index) => index === 13 || value === previousQuery.queryKey[index],
         );
-      return (resource === 'logs' || pageTurnOnly) &&
+      const sameLogConditions =
+        resource === 'logs' &&
+        previousQuery &&
+        [8, 9, 15].every(index => currentReport.queryKey[index] === previousQuery.queryKey[index]);
+      return (sameLogConditions || pageTurnOnly) &&
         websiteMatchesHandle(previous?.website, websiteId) &&
         previousQuery?.queryKey[3] === resource &&
         previousQuery?.queryKey[14] === userId &&
@@ -323,13 +328,37 @@ export function LiekanPage({ resource }: { resource: Resource }) {
     },
     refetchInterval: false,
   });
-  const query = useFreshnessLifecycle(rawQuery, {
+  const entryQuery = useFreshnessLifecycle(rawQuery, {
     queryKey: currentReport.queryKey,
     enabled: !!websiteId && !metadataLoading,
     aggregate: resource !== 'logs',
     endAt,
     timezone,
   });
+  const query = useLogReportParts(
+    entryQuery,
+    currentReport.queryKey,
+    reportInput,
+    resource === 'logs' && !!websiteId && !metadataLoading,
+  );
+  useEffect(() => {
+    if (
+      resource === 'logs' &&
+      params.cursor &&
+      ['log-read-boundary-conflict', 'history-repair-cursor-conflict'].includes(
+        (query.error as any)?.code,
+      )
+    )
+      router.replace(
+        updateParams({
+          page: undefined,
+          cursor: undefined,
+          seek: undefined,
+          readBoundary: undefined,
+        }),
+        { scroll: false },
+      );
+  }, [resource, params.cursor, (query.error as any)?.code, router, updateParams]);
   const reportKey = JSON.stringify(currentReport.queryKey);
   const activeReportKey = useRef(reportKey);
   activeReportKey.current = reportKey;
@@ -532,6 +561,7 @@ export function LiekanPage({ resource }: { resource: Resource }) {
     if (report?.website)
       shell.setWebsite({
         ...report.website,
+        robotsRange: report.range,
         teamId: website?.teamId,
         demo: report.meta.demo,
       } as any);
@@ -541,13 +571,14 @@ export function LiekanPage({ resource }: { resource: Resource }) {
         name: website.name,
         domain: website.domain,
         siteNumber: website.siteNumber,
+        robotsRange: { startAt, endAt, timezone },
         teamId: website.teamId,
       } as any);
     if (report?.tables.botBody)
       shell.setBotCount(
         report.states.logs === 'not_connected' ? null : report.tables.botBody.length,
       );
-  }, [report, website, shell?.setWebsite, shell?.setBotCount]);
+  }, [report, website, startAt, endAt, timezone, shell?.setWebsite, shell?.setBotCount]);
   useEffect(() => {
     if (websiteMatchesHandle(report?.website, websiteId) && userId)
       queryClient.setQueryData(
@@ -600,6 +631,7 @@ export function LiekanPage({ resource }: { resource: Resource }) {
       page,
       cursor: cursor || undefined,
       seek: cursor ? (next ? 'after' : 'before') : undefined,
+      readBoundary: cursor ? report?.meta.logReadBoundary : undefined,
     });
   };
   const exportGeography = async () => {
@@ -821,34 +853,6 @@ export function LiekanPage({ resource }: { resource: Resource }) {
   const View = reportViews[resource];
   const headerActions = (
     <div data-liekan-owned-actions className={styles.headerActions}>
-      {(resource.startsWith('ai/') || resource === 'logs') && (
-        <label className="chip">
-          <span>{i18n.text('蜘蛛身份范围')}</span>
-          <select
-            aria-label={i18n.text('蜘蛛身份范围')}
-            value={
-              params.crawlerIdentityScope === 'verified_identity'
-                ? 'verified_identity'
-                : params.crawlerIdentityScope === 'verified_range'
-                  ? 'verified_range'
-                  : 'all'
-            }
-            onChange={event =>
-              updateView({
-                ...clearTablePages(tablePages),
-                crawlerIdentityScope: event.target.value === 'all' ? undefined : event.target.value,
-                page: undefined,
-                cursor: undefined,
-                seek: undefined,
-              })
-            }
-          >
-            <option value="all">{i18n.text('全部声明')}</option>
-            <option value="verified_identity">{i18n.text('已核验身份')}</option>
-            <option value="verified_range">{i18n.text('官方范围匹配')}</option>
-          </select>
-        </label>
-      )}
       <QuickRangeButtons
         variant="chip"
         activeToken={activeQuickDateRange(params)}
@@ -962,12 +966,15 @@ export function LiekanPage({ resource }: { resource: Resource }) {
       <div className={styles.analysisTools}>
         {report?.meta.snapshot && (
           <span>
-            {i18n.text('数据截至 {v0}，后台每 30 秒更新', [
+            {i18n.text('数据截至 {v0}，后台每 30 秒检查更新', [
               new Date(report.meta.snapshot.dataThrough).toLocaleString(i18n.locale, {
                 timeZone: report.range.timezone,
                 hour12: false,
               }),
             ])}
+            {report.meta.snapshot.updateError && (
+              <span role="status"> · {i18n.text('更新失败，当前显示上次读取的数据')}</span>
+            )}
           </span>
         )}
         {resource === 'logs' && (
@@ -1199,7 +1206,7 @@ export function LiekanPage({ resource }: { resource: Resource }) {
               onLogsFilter={onFilter}
               logsFilter={filter}
               report={report}
-              isFetching={query.isFetching}
+              isFetching={resource === 'logs' ? entryQuery.isFetching : query.isFetching}
               onRange={setRange}
               comparison={
                 compare

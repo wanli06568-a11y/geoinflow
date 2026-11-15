@@ -164,6 +164,7 @@ export function statisticsCacheTtl(end: number | Date, timezone = 'UTC', now = D
 }
 
 export function isAggregateRequest(path: string, params?: Record<string, any>) {
+  if (/^\/liekan\/websites\/[^/]+\/(?:log-count|log-summary)$/.test(path)) return true;
   if (params?.resource === 'logs') return false;
   if (
     path.endsWith('/analytics') &&
@@ -248,6 +249,7 @@ export const pageCacheModules: Record<string, Record<string, PageCacheMode>> = {
 pageCacheModules['ai-chat'] = { catalog: 'direct', conversations: 'direct', answers: 'direct' };
 pageCacheModules['crawlers-manage'] = { catalog: 'direct', drafts: 'direct' };
 pageCacheModules['analytics-acceleration'] = { status: 'direct', tasks: 'direct' };
+pageCacheModules['admin-analytics-engine'] = { status: 'direct', tasks: 'direct' };
 pageCacheModules['history-repair'] = { tasks: 'direct', previews: 'direct', records: 'direct' };
 pageCacheModules['ai-config'] = { connections: 'direct', connectionTests: 'direct' };
 for (const page of [
